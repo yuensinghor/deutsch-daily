@@ -1,0 +1,3 @@
+# Paste lines like this into the app (⋯ menu). German | English | note | level 1-3
+# Note and level are optional. Lines starting with # are ignored.
+Ich bin heute irgendwie total müde. | I'm somehow really tired today. | 'irgendwie' = somehow | 1
