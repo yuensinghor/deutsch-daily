@@ -1,283 +1,239 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   AppState, Modal, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
 } from "react-native";
-import * as Speech from "expo-speech";
-import * as Clipboard from "expo-clipboard";
-import {
-  ExpoSpeechRecognitionModule,
-  useSpeechRecognitionEvent,
-} from "expo-speech-recognition";
-
 import { SENTENCES } from "./src/sentences";
 import { loadState, saveState } from "./src/storage";
 import {
-  REPS_GOAL, allSentences, buildToday, completeCard, currentStreak, dateStr,
-  makeBackup, parseImport, readBackup, wordDiff,
+  addVoiceDownloadListener, sherpaSpeak, sherpaStop, sherpaTtsAvailable,
+} from "./modules/sherpa-tts";
+import {
+  allSentences, buildToday, completeCard, currentStreak, dateStr,
+  markSentenceLearned, parseImport,
 } from "./src/logic";
 
 const C = {
-  bg: "#000000", text: "#FFFFFF", dim: "#8E8E93", faint: "#3A3A3C",
-  panel: "#1C1C1E", accent: "#FF9F0A", good: "#30D158", bad: "#FF453A",
+  bg: "#000000", text: "#FFFFFF", dim: "#A1A1A6", faint: "#3A3A3C",
+  panel: "#1C1C1E", accent: "#FF9F0A", good: "#30D158",
 };
 
 export default function App() {
   const [state, setState] = useState(null);
-  const [reps, setReps] = useState(0);
-  const [revealed, setRevealed] = useState(false);
-  const [heard, setHeard] = useState("");
-  const [listening, setListening] = useState(false);
-  const [micMsg, setMicMsg] = useState("");
+  const [view, setView] = useState("today");
+  const [libraryId, setLibraryId] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [importText, setImportText] = useState("");
-  const [addMsg, setAddMsg] = useState("");
+  const [importMessage, setImportMessage] = useState("");
+  const [speechMessage, setSpeechMessage] = useState("");
+  const [voiceStatus, setVoiceStatus] = useState("");
+  const [speaking, setSpeaking] = useState(false);
 
-  // load once, then make sure today's list exists
   useEffect(() => {
-    loadState().then((s) => setState(buildToday(s, allSentences(SENTENCES, s), dateStr())));
+    loadState().then((loaded) => setState(buildToday(loaded, allSentences(SENTENCES, loaded), dateStr())));
   }, []);
 
-  // save on every change
   useEffect(() => {
     if (state) saveState(state);
   }, [state]);
 
-  // new day while the app stays open in the background
   useEffect(() => {
-    const sub = AppState.addEventListener("change", (st) => {
-      if (st === "active") {
-        setState((prev) => (prev ? buildToday(prev, allSentences(SENTENCES, prev), dateStr()) : prev));
+    const sub = AppState.addEventListener("change", (status) => {
+      if (status === "active") {
+        setState((current) => current ? buildToday(current, allSentences(SENTENCES, current), dateStr()) : current);
       }
     });
     return () => sub.remove();
   }, []);
 
-  const bank = useMemo(() => {
-    const map = {};
-    if (state) allSentences(SENTENCES, state).forEach((s) => { map[s.id] = s; });
-    return map;
-  }, [state && state.custom]);
-
-  const today = dateStr();
-  const cards = state ? state.today.cards : [];
-  const doneIds = state ? state.today.done : [];
-  const card = cards.find((c) => !doneIds.includes(c.id));
-  const sentence = card ? bank[card.id] : null;
-  const streak = state ? currentStreak(state, today) : 0;
-
-  // reset per-card UI when the card changes
   useEffect(() => {
-    setReps(0); setRevealed(false); setHeard(""); setMicMsg("");
-  }, [card && card.id]);
-
-  // ---------- speech ----------
-  const speak = useCallback((text, rate) => {
-    Speech.stop();
-    Speech.speak(text, { language: "de-DE", rate });
+    const subscription = addVoiceDownloadListener(({ progress }) => {
+      setVoiceStatus(progress >= 100 ? "Loading German voice…" : `Downloading German voice · ${progress}%`);
+    });
+    return () => subscription?.remove();
   }, []);
 
-  useSpeechRecognitionEvent("start", () => setListening(true));
-  useSpeechRecognitionEvent("end", () => setListening(false));
-  useSpeechRecognitionEvent("result", (e) => {
-    const t = e.results && e.results[0] ? e.results[0].transcript : "";
-    setHeard(t);
-  });
-  useSpeechRecognitionEvent("error", (e) => {
-    setListening(false);
-    setMicMsg("Mic check failed (" + (e.error || "unknown") + "). Try again.");
-  });
+  const sentences = state ? allSentences(SENTENCES, state) : [];
+  const bank = Object.fromEntries(sentences.map((item) => [item.id, item]));
+  const todayCard = state?.today?.cards?.[0];
+  const todaySentence = todayCard ? bank[todayCard.id] : null;
+  const selectedSentence = libraryId ? bank[libraryId] : null;
+  const learnedCount = sentences.filter((item) => state?.learned?.[item.id]).length;
+  const streak = state ? currentStreak(state, dateStr()) : 0;
+  const completedToday = Boolean(todayCard && state?.today?.done?.includes(todayCard.id));
 
-  async function startMic() {
-    setMicMsg(""); setHeard("");
-    const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-    if (!perm.granted) { setMicMsg("Allow the microphone to use the check."); return; }
-    Speech.stop();
-    ExpoSpeechRecognitionModule.start({ lang: "de-DE", interimResults: true, maxAlternatives: 1 });
+  async function speak(text) {
+    setSpeechMessage("");
+    setSpeaking(true);
+    if (!sherpaTtsAvailable) {
+      setSpeaking(false);
+      setSpeechMessage("The Sherpa German voice engine is missing from this APK. Build a new Android APK from the updated project.");
+      return;
+    }
+
+    setVoiceStatus("Preparing Dii high German voice…");
+    try {
+      await sherpaSpeak(text);
+    } catch (error) {
+      setSpeechMessage(error?.message || "Could not play the Dii high German voice. Connect to the internet and try again.");
+    } finally {
+      setVoiceStatus("");
+      setSpeaking(false);
+    }
   }
 
-  function stopMic() {
-    ExpoSpeechRecognitionModule.stop();
+  function stopSpeaking() {
+    sherpaStop();
+    setVoiceStatus("");
+    setSpeaking(false);
   }
 
-  // ---------- actions ----------
-  function finish(ok) {
-    Speech.stop();
-    setState((s) => completeCard(s, card.id, ok, dateStr()));
-  }
-
-  function reveal() {
-    setRevealed(true);
-    speak(sentence.de, 0.9);
+  function completeToday() {
+    if (!todayCard || completedToday) return;
+    stopSpeaking();
+    setState((current) => completeCard(current, todayCard.id, true, dateStr()));
   }
 
   function runImport() {
-    const txt = importText.trim();
-    if (!txt) { setAddMsg("Paste sentences or a backup first."); return; }
+    const text = importText.trim();
+    if (!text) { setImportMessage("Type or paste at least one German sentence."); return; }
 
-    if (txt.startsWith("{")) {
-      const b = readBackup(txt);
-      if (!b) { setAddMsg("That backup could not be read."); return; }
-      setState((s) => buildToday({ ...s, learned: b.learned, custom: b.custom, streak: b.streak, today: null },
-        allSentences(SENTENCES, { custom: b.custom }), dateStr()));
-      setAddMsg("Backup restored.");
-      setImportText("");
+    const existing = sentences.map((item) => item.de);
+    const { added, skipped } = parseImport(text, existing);
+    if (!added.length) {
+      setImportMessage("No new sentences added. " + skipped.length + " duplicate or empty German line(s) skipped.");
       return;
     }
-
-    const existing = allSentences(SENTENCES, state).map((s) => s.de);
-    const { added, skipped } = parseImport(txt, existing);
-    if (added.length === 0) {
-      setAddMsg("Nothing new added. " + skipped.length + " line(s) skipped (duplicate or wrong format).");
-      return;
-    }
-    setState((s) => {
-      const custom = s.custom.concat(added);
-      const keepToday = s.today && s.today.cards.length > 0;
-      return buildToday({ ...s, custom, today: keepToday ? s.today : null },
-        allSentences(SENTENCES, { custom }), dateStr());
+    setState((current) => {
+      const updated = { ...current, custom: current.custom.concat(added) };
+      const todayIsEmpty = current.today?.date === dateStr() && (current.today.cards || []).length === 0;
+      if (!todayIsEmpty) return updated;
+      const readyForNewSentence = { ...updated, today: null };
+      return buildToday(readyForNewSentence, allSentences(SENTENCES, readyForNewSentence), dateStr());
     });
-    setAddMsg("Added " + added.length + " sentence(s)." + (skipped.length ? " Skipped " + skipped.length + "." : ""));
+    setImportMessage("Added " + added.length + " sentence(s) to your library." +
+      (skipped.length ? " Skipped " + skipped.length + " duplicate or empty German line(s)." : ""));
     setImportText("");
   }
 
-  async function copyBackup() {
-    await Clipboard.setStringAsync(makeBackup(state));
-    setAddMsg("Backup copied. Paste it into a note to keep it safe.");
+  function markSelectedLearned() {
+    if (!libraryId) return;
+    setState((current) => markSentenceLearned(current, libraryId, dateStr()));
   }
 
-  async function pasteClipboard() {
-    const t = await Clipboard.getStringAsync();
-    setImportText(t || "");
-  }
+  if (!state) return <View style={styles.root} />;
 
-  if (!state) return <View style={s.root} />;
-
-  // ---------- screens ----------
-  let body;
-  if (cards.length === 0) {
-    body = (
-      <Center title="All caught up" sub={"No new sentences left and nothing to review.\nOpen ⋯ and paste a new batch."} />
-    );
-  } else if (!card) {
-    body = (
-      <Center title="Done for today" sub={"🔥 " + streak + (streak === 1 ? " day" : " days") + " in a row\nSee you tomorrow."} />
-    );
-  } else if (card.type === "new") {
-    const diff = heard ? wordDiff(sentence.de, heard) : null;
-    body = (
-      <ScrollView contentContainerStyle={s.cardWrap}>
-        <Text style={s.tag}>New · {"●".repeat(sentence.level)}{"○".repeat(3 - sentence.level)}</Text>
-        <Text style={s.de}>{sentence.de}</Text>
-        <Text style={s.en}>{sentence.en}</Text>
-        {sentence.note ? <Text style={s.note}>{sentence.note}</Text> : null}
-
-        <View style={s.row}>
-          <Btn label="🔊 Listen" onPress={() => speak(sentence.de, 0.95)} />
-          <Btn label="🐢 Slow" onPress={() => speak(sentence.de, 0.55)} />
-          <Btn label={listening ? "■ Stop" : "🎤 Check"} onPress={listening ? stopMic : startMic} />
-        </View>
-
-        {diff ? (
-          <Text style={s.diff}>
-            {diff.map((d, i) => (
-              <Text key={i} style={{ color: d.ok ? C.good : C.bad }}>{d.word + " "}</Text>
-            ))}
-          </Text>
-        ) : null}
-        {micMsg ? <Text style={s.micMsg}>{micMsg}</Text> : null}
-
-        <Pressable style={s.repBtn} onPress={() => setReps((r) => r + 1)}>
-          <Text style={s.repTxt}>I said it aloud</Text>
-          <Text style={s.repCount}>{reps} / {REPS_GOAL}</Text>
-        </Pressable>
-
-        <Pressable
-          style={[s.main, reps < REPS_GOAL && s.mainOff]}
-          disabled={reps < REPS_GOAL}
-          onPress={() => finish(true)}
-        >
-          <Text style={[s.mainTxt, reps < REPS_GOAL && { color: C.dim }]}>
-            {reps < REPS_GOAL ? "Say it " + REPS_GOAL + " times to finish" : "Got it ✓"}
-          </Text>
-        </Pressable>
-      </ScrollView>
-    );
-  } else {
-    body = (
-      <ScrollView contentContainerStyle={s.cardWrap}>
-        <Text style={s.tag}>Recall</Text>
-        <Text style={s.deHidden}>{sentence.en}</Text>
-        {!revealed ? (
-          <Pressable style={s.main} onPress={reveal}>
-            <Text style={s.mainTxt}>Show German</Text>
+  const sentence = view === "library" ? selectedSentence : todaySentence;
+  const sentenceIsLearned = Boolean(sentence && state.learned?.[sentence.id]);
+  return (
+    <View style={styles.root}>
+      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      <View style={styles.header}>
+        {view === "today" ? (
+          <Text style={styles.streak} accessibilityLabel={streak + " day streak"}>🔥 {streak}</Text>
+        ) : (
+          <Pressable onPress={() => { stopSpeaking(); setLibraryId(null); setView("today"); }} style={styles.headerBack} accessibilityRole="button" accessibilityLabel="Back to today">
+            <Text style={styles.headerBackText}>‹ Today</Text>
+          </Pressable>
+        )}
+        {view === "library" ? <Text style={styles.headerTitle}>Library</Text> : <View style={styles.headerSpacer} />}
+        {view === "today" ? (
+          <Pressable onPress={() => { stopSpeaking(); setLibraryId(null); setView("library"); }} hitSlop={16} accessibilityRole="button" accessibilityLabel="Open sentence library">
+            <Text style={styles.menu}>⋯</Text>
           </Pressable>
         ) : (
-          <>
-            <Text style={s.de}>{sentence.de}</Text>
-            {sentence.note ? <Text style={s.note}>{sentence.note}</Text> : null}
-            <View style={s.row}>
-              <Btn label="🔊 Listen" onPress={() => speak(sentence.de, 0.95)} />
-              <Btn label="🐢 Slow" onPress={() => speak(sentence.de, 0.55)} />
-            </View>
-            <View style={s.row}>
-              <Pressable style={[s.half, { backgroundColor: C.panel }]} onPress={() => finish(false)}>
-                <Text style={s.mainTxtLight}>Again</Text>
-              </Pressable>
-              <Pressable style={[s.half, { backgroundColor: C.text }]} onPress={() => finish(true)}>
-                <Text style={s.mainTxt}>Knew it ✓</Text>
-              </Pressable>
-            </View>
-          </>
+          <Pressable onPress={() => { setImportMessage(""); setShowAdd(true); }} hitSlop={16} accessibilityRole="button" accessibilityLabel="Import sentences">
+            <Text style={styles.importMenu}>＋</Text>
+          </Pressable>
         )}
-      </ScrollView>
-    );
-  }
-
-  return (
-    <View style={s.root}>
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      <View style={s.header}>
-        <Text style={s.streak}>🔥 {streak}</Text>
-        <Text style={s.progress}>
-          {cards.length > 0 ? Math.min(doneIds.length + 1, cards.length) + " / " + cards.length : ""}
-        </Text>
-        <Pressable onPress={() => { setAddMsg(""); setShowAdd(true); }} hitSlop={16}>
-          <Text style={s.menu}>⋯</Text>
-        </Pressable>
       </View>
 
-      {body}
+      {view === "library" && !selectedSentence ? (
+        <ScrollView contentContainerStyle={styles.libraryWrap}>
+          <View style={styles.libraryIntro}>
+            <Text style={styles.libraryTitle}>Your sentences</Text>
+            <Text style={styles.librarySubtitle}>{learnedCount} learned · {sentences.length - learnedCount} to learn</Text>
+          </View>
+          <Pressable style={styles.importButton} onPress={() => { setImportMessage(""); setShowAdd(true); }} accessibilityRole="button">
+            <Text style={styles.importButtonText}>＋  Import sentences</Text>
+          </Pressable>
+          {sentences.map((item) => {
+            const learned = Boolean(state.learned?.[item.id]);
+            return (
+              <Pressable key={item.id} style={styles.libraryItem} onPress={() => { setLibraryId(item.id); setSpeechMessage(""); }} accessibilityRole="button">
+                <Text style={styles.libraryDe}>{item.de}</Text>
+                {item.en ? <Text style={styles.libraryEn}>{item.en}</Text> : null}
+                <Text style={[styles.libraryStatus, learned ? styles.learnedStatus : styles.unlearnedStatus]}>
+                  {learned ? "✓ Learned" : "Not learned yet"}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      ) : sentence ? (
+        <View style={styles.practiceScreen}>
+          {view === "library" ? (
+            <Pressable onPress={() => { stopSpeaking(); setLibraryId(null); }} style={styles.backButton} accessibilityRole="button">
+              <Text style={styles.backText}>‹  Library</Text>
+            </Pressable>
+          ) : null}
+          <ScrollView contentContainerStyle={styles.sentenceContent}>
+            <Text style={styles.de}>{sentence.de}</Text>
+            {sentence.en ? <Text style={styles.en}>{sentence.en}</Text> : null}
+            {view === "library" ? (
+              <Text style={[styles.learnedTag, sentenceIsLearned ? styles.learnedStatus : styles.unlearnedStatus]}>
+                {sentenceIsLearned ? "✓ Learned · available to rehearse anytime" : "Not learned yet · practise whenever you like"}
+              </Text>
+            ) : null}
+            {speechMessage ? <Text style={styles.speechMessage}>{speechMessage}</Text> : null}
+            {voiceStatus ? <Text style={styles.voiceStatus}>{voiceStatus}</Text> : null}
+          </ScrollView>
+          <View style={styles.bottomActions}>
+            <Pressable style={styles.listenButton} onPress={() => speaking ? stopSpeaking() : speak(sentence.de)}>
+              <Text style={styles.listenButtonText}>{speaking ? "■  Stop" : "▶  Hear sentence"}</Text>
+            </Pressable>
+            {view === "today" && !completedToday ? (
+              <Pressable style={styles.learnButton} onPress={completeToday}>
+                <Text style={styles.learnButtonText}>I’ve learned this sentence</Text>
+              </Pressable>
+            ) : null}
+            {view === "library" && !sentenceIsLearned ? (
+              <Pressable style={styles.learnButton} onPress={markSelectedLearned}>
+                <Text style={styles.learnButtonText}>I’ve learned this sentence</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        </View>
+      ) : (
+        <View style={styles.emptyToday}>
+          <Text style={styles.emptyTitle}>That’s all for today</Text>
+          <Text style={styles.emptyText}>Come back tomorrow for your next sentence. You can revisit learned sentences in your library.</Text>
+        </View>
+      )}
 
       <Modal visible={showAdd} animationType="slide" onRequestClose={() => setShowAdd(false)}>
-        <View style={s.root}>
-          <View style={s.header}>
-            <Text style={s.modalTitle}>Add sentences or restore</Text>
-            <Pressable onPress={() => setShowAdd(false)} hitSlop={16}>
-              <Text style={s.menu}>✕</Text>
+        <View style={styles.root}>
+          <View style={styles.header}>
+            <Text style={styles.modalTitle}>Import sentences</Text>
+            <Pressable onPress={() => setShowAdd(false)} hitSlop={16} accessibilityRole="button" accessibilityLabel="Close">
+              <Text style={styles.menu}>✕</Text>
             </Pressable>
           </View>
-          <ScrollView contentContainerStyle={{ padding: 20 }} keyboardShouldPersistTaps="handled">
-            <Text style={s.note}>
-              One sentence per line:{"\n"}German | English | note | level (1-3){"\n"}
-              Note and level are optional. Or paste a backup.
-            </Text>
+          <ScrollView contentContainerStyle={styles.modalContent} keyboardShouldPersistTaps="handled">
+            <Text style={styles.modalHint}>Paste a whole batch at once, one sentence per line: German, then a tab, then English (optional). A German-only line is fine.</Text>
             <TextInput
-              style={s.input}
+              style={styles.input}
               multiline
               value={importText}
               onChangeText={setImportText}
-              placeholder="Paste here"
+              placeholder="German sentence [TAB] English translation (optional)\nOne sentence per line"
               placeholderTextColor={C.dim}
               autoCapitalize="none"
               autoCorrect={false}
             />
-            {addMsg ? <Text style={s.micMsg}>{addMsg}</Text> : null}
-            <View style={s.row}>
-              <Btn label="Paste" onPress={pasteClipboard} />
-              <Btn label="Copy backup" onPress={copyBackup} />
-            </View>
-            <Pressable style={s.main} onPress={runImport}>
-              <Text style={s.mainTxt}>Import</Text>
+            <Text style={styles.importExample}>Example: Guten Morgen.  [TAB]  Good morning.</Text>
+            {importMessage ? <Text style={styles.speechMessage}>{importMessage}</Text> : null}
+            <Pressable style={styles.learnButton} onPress={runImport}>
+              <Text style={styles.learnButtonText}>Add to library</Text>
             </Pressable>
           </ScrollView>
         </View>
@@ -286,58 +242,48 @@ export default function App() {
   );
 }
 
-function Btn({ label, onPress }) {
-  return (
-    <Pressable style={s.btn} onPress={onPress}>
-      <Text style={s.btnTxt}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function Center({ title, sub }) {
-  return (
-    <View style={s.center}>
-      <Text style={s.bigTitle}>{title}</Text>
-      <Text style={s.centerSub}>{sub}</Text>
-    </View>
-  );
-}
-
-const s = StyleSheet.create({
+const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg, paddingTop: (StatusBar.currentHeight || 24) + 8 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, paddingBottom: 8 },
-  streak: { color: C.accent, fontSize: 22, fontWeight: "700" },
-  progress: { color: C.dim, fontSize: 16 },
-  menu: { color: C.text, fontSize: 28, paddingHorizontal: 6 },
+  header: { height: 54, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 22 },
+  streak: { color: C.accent, fontSize: 17, fontWeight: "700", minWidth: 50 },
+  headerBack: { minWidth: 70, paddingVertical: 8 },
+  headerBackText: { color: C.dim, fontSize: 15, fontWeight: "600" },
+  headerTitle: { color: C.text, fontSize: 17, fontWeight: "700" },
+  headerSpacer: { flex: 1 },
+  menu: { color: C.dim, fontSize: 26, paddingHorizontal: 4 },
+  importMenu: { color: C.text, fontSize: 28, paddingHorizontal: 4 },
+  practiceScreen: { flex: 1, paddingHorizontal: 25, paddingTop: 24, paddingBottom: 18 },
+  backButton: { alignSelf: "flex-start", marginBottom: 26, paddingVertical: 4 },
+  backText: { color: C.dim, fontSize: 15, fontWeight: "600" },
+  sentenceContent: { flexGrow: 1, justifyContent: "center", paddingBottom: 24 },
+  de: { color: C.text, fontSize: 34, lineHeight: 45, fontWeight: "700" },
+  en: { color: C.dim, fontSize: 18, lineHeight: 27, marginTop: 20 },
+  learnedTag: { color: C.good, fontSize: 14, marginTop: 24 },
+  speechMessage: { color: C.accent, fontSize: 14, lineHeight: 20, marginTop: 16 },
+  voiceStatus: { color: C.dim, fontSize: 14, lineHeight: 20, textAlign: "center", marginTop: 12 },
+  bottomActions: { paddingBottom: 18 },
+  listenButton: { backgroundColor: C.text, borderRadius: 18, minHeight: 62, alignItems: "center", justifyContent: "center" },
+  listenButtonText: { color: C.bg, fontSize: 19, fontWeight: "700" },
+  learnButton: { marginTop: 12, borderRadius: 16, minHeight: 56, paddingHorizontal: 18, backgroundColor: C.panel, alignItems: "center", justifyContent: "center" },
+  learnButtonText: { color: C.text, fontSize: 16, fontWeight: "600" },
+  libraryWrap: { paddingHorizontal: 22, paddingBottom: 44 },
+  libraryIntro: { marginTop: 18, marginBottom: 8 },
+  libraryTitle: { color: C.text, fontSize: 27, fontWeight: "700" },
+  librarySubtitle: { color: C.dim, fontSize: 15, lineHeight: 22, marginTop: 8 },
+  importButton: { backgroundColor: C.panel, borderRadius: 14, minHeight: 50, alignItems: "center", justifyContent: "center", marginTop: 14, marginBottom: 8 },
+  importButtonText: { color: C.text, fontSize: 16, fontWeight: "600" },
+  libraryItem: { backgroundColor: C.panel, borderRadius: 16, padding: 17, marginTop: 12 },
+  libraryDe: { color: C.text, fontSize: 19, lineHeight: 27, fontWeight: "600" },
+  libraryEn: { color: C.dim, fontSize: 15, lineHeight: 22, marginTop: 8 },
+  libraryStatus: { fontSize: 13, fontWeight: "600", marginTop: 10 },
+  learnedStatus: { color: C.good },
+  unlearnedStatus: { color: C.dim },
+  emptyToday: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
+  emptyTitle: { color: C.text, fontSize: 23, lineHeight: 31, fontWeight: "700", textAlign: "center" },
+  emptyText: { color: C.dim, fontSize: 16, lineHeight: 24, textAlign: "center", marginTop: 12 },
   modalTitle: { color: C.text, fontSize: 18, fontWeight: "600" },
-
-  cardWrap: { padding: 20, paddingBottom: 48 },
-  tag: { color: C.dim, fontSize: 14, marginBottom: 16 },
-  de: { color: C.text, fontSize: 30, lineHeight: 40, fontWeight: "700" },
-  deHidden: { color: C.text, fontSize: 26, lineHeight: 36, fontWeight: "600", marginBottom: 24 },
-  en: { color: C.dim, fontSize: 18, lineHeight: 26, marginTop: 14 },
-  note: { color: C.dim, fontSize: 14, lineHeight: 20, marginTop: 14, fontStyle: "italic" },
-
-  row: { flexDirection: "row", gap: 10, marginTop: 24 },
-  btn: { flex: 1, backgroundColor: C.panel, borderRadius: 14, paddingVertical: 14, alignItems: "center" },
-  btnTxt: { color: C.text, fontSize: 15 },
-
-  diff: { fontSize: 20, lineHeight: 30, marginTop: 20, fontWeight: "600" },
-  micMsg: { color: C.dim, fontSize: 14, marginTop: 12 },
-
-  repBtn: { marginTop: 28, borderWidth: 1.5, borderColor: C.faint, borderRadius: 16, paddingVertical: 18, alignItems: "center" },
-  repTxt: { color: C.text, fontSize: 17 },
-  repCount: { color: C.accent, fontSize: 28, fontWeight: "700", marginTop: 4 },
-
-  main: { marginTop: 16, backgroundColor: C.text, borderRadius: 16, paddingVertical: 18, alignItems: "center" },
-  mainOff: { backgroundColor: C.panel },
-  mainTxt: { color: C.bg, fontSize: 18, fontWeight: "700" },
-  mainTxtLight: { color: C.text, fontSize: 18, fontWeight: "700" },
-  half: { flex: 1, borderRadius: 16, paddingVertical: 18, alignItems: "center" },
-
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
-  bigTitle: { color: C.text, fontSize: 32, fontWeight: "700" },
-  centerSub: { color: C.dim, fontSize: 18, lineHeight: 28, textAlign: "center", marginTop: 14 },
-
+  modalContent: { padding: 20, paddingBottom: 48 },
+  modalHint: { color: C.dim, fontSize: 15, lineHeight: 23 },
   input: { backgroundColor: C.panel, color: C.text, borderRadius: 14, padding: 14, minHeight: 200, marginTop: 16, fontSize: 15, textAlignVertical: "top" },
+  importExample: { color: C.dim, fontSize: 14, lineHeight: 21, marginTop: 12 },
 });
