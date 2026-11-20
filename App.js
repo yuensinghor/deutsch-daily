@@ -27,12 +27,9 @@ export default function App() {
   const [speechMessage, setSpeechMessage] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
   const [speaking, setSpeaking] = useState(false);
-  const [repeatEnabled, setRepeatEnabled] = useState(false);
+  const [playbackMode, setPlaybackMode] = useState(null);
   const [playlist, setPlaylist] = useState(null);
   const playbackRun = useRef(0);
-  const repeatEnabledRef = useRef(false);
-
-  useEffect(() => { repeatEnabledRef.current = repeatEnabled; }, [repeatEnabled]);
 
   useEffect(() => {
     loadState().then((loaded) => setState(buildToday(loaded, allSentences(SENTENCES, loaded), dateStr())));
@@ -67,14 +64,15 @@ export default function App() {
   const streak = state ? currentStreak(state, dateStr()) : 0;
   const completedToday = Boolean(todayCard && state?.today?.done?.includes(todayCard.id));
 
-  async function speak(text) {
-    playbackRun.current += 1;
+  async function startSentenceLoop(text) {
+    sherpaStop();
+    const run = ++playbackRun.current;
     setPlaylist(null);
-    repeatEnabledRef.current = false;
-    setRepeatEnabled(false);
+    setPlaybackMode("sentence");
     setSpeechMessage("");
     setSpeaking(true);
     if (!sherpaTtsAvailable) {
+      setPlaybackMode(null);
       setSpeaking(false);
       setSpeechMessage("The Sherpa German voice engine is missing from this APK. Build a new Android APK from the updated project.");
       return;
@@ -82,35 +80,43 @@ export default function App() {
 
     setVoiceStatus("Preparing Dii high German voice…");
     try {
-      await sherpaSpeak(text);
+      while (playbackRun.current === run) await sherpaSpeak(text);
     } catch (error) {
-      setSpeechMessage(error?.message || "Could not play the Dii high German voice. Connect to the internet and try again.");
+      if (playbackRun.current === run) {
+        setSpeechMessage(error?.message || "Could not play the Dii high German voice. Connect to the internet and try again.");
+      }
     } finally {
-      setVoiceStatus("");
-      setSpeaking(false);
+      if (playbackRun.current === run) {
+        setVoiceStatus("");
+        setPlaybackMode(null);
+        setSpeaking(false);
+      }
     }
   }
 
   async function playPlaylist(items) {
     const learned = items.filter((item) => state?.learned?.[item.id]);
     if (!learned.length) return;
+    sherpaStop();
     const run = ++playbackRun.current;
+    setPlaybackMode("playlist");
     setPlaylist({ active: true, index: 0, total: learned.length });
     setSpeaking(true);
     setSpeechMessage("");
-    for (let index = 0; index < learned.length && playbackRun.current === run; index += 1) {
-      setPlaylist({ active: true, index, total: learned.length });
-      try {
-        await sherpaSpeak(learned[index].de);
-      } catch (error) {
-        if (playbackRun.current === run) {
-          setSpeechMessage(error?.message || "Could not play the learned sentences.");
+    setVoiceStatus("Preparing Dii high German voice…");
+    try {
+      while (playbackRun.current === run) {
+        for (let index = 0; index < learned.length && playbackRun.current === run; index += 1) {
+          setPlaylist({ active: true, index, total: learned.length });
+          await sherpaSpeak(learned[index].de);
         }
-        break;
       }
+    } catch (error) {
+      if (playbackRun.current === run) setSpeechMessage(error?.message || "Could not play the learned sentences.");
     }
     if (playbackRun.current === run) {
       setPlaylist(null);
+      setPlaybackMode(null);
       setSpeaking(false);
       setVoiceStatus("");
     }
@@ -119,6 +125,7 @@ export default function App() {
   function stopSpeaking() {
     playbackRun.current += 1;
     setPlaylist(null);
+    setPlaybackMode(null);
     sherpaStop();
     setVoiceStatus("");
     setSpeaking(false);
@@ -192,13 +199,13 @@ export default function App() {
           </View>
           {learnedCount > 0 ? (
             <Pressable
-              style={[styles.playAllButton, speaking && styles.playAllButtonActive]}
-              onPress={() => speaking ? stopSpeaking() : playPlaylist(sentences)}
+              style={[styles.playAllButton, playbackMode === "playlist" && styles.playAllButtonActive]}
+              onPress={() => playbackMode === "playlist" ? stopSpeaking() : playPlaylist(sentences)}
               accessibilityRole="button"
-              accessibilityLabel={speaking ? "Stop learned sentences" : "Play all learned sentences"}
+              accessibilityLabel={playbackMode === "playlist" ? "Stop learned sentences" : "Play all learned sentences"}
             >
               <Text style={styles.playAllButtonText}>
-                {speaking ? "■  Stop playback" : "▶  Play learned sentences"}
+                {playbackMode === "playlist" ? "■  Stop playback" : "▶  Play learned sentences"}
               </Text>
               {playlist?.active ? <Text style={styles.playlistProgress}>Sentence {playlist.index + 1} of {playlist.total}</Text> : null}
             </Pressable>
@@ -238,44 +245,14 @@ export default function App() {
             {voiceStatus ? <Text style={styles.voiceStatus}>{voiceStatus}</Text> : null}
           </ScrollView>
           <View style={styles.bottomActions}>
-            <Pressable style={styles.listenButton} onPress={() => speaking ? stopSpeaking() : speak(sentence.de)}>
-              <Text style={styles.listenButtonText}>{speaking ? "■  Stop" : "▶  Hear sentence"}</Text>
-            </Pressable>
             <Pressable
-              style={[styles.repeatButton, repeatEnabled && styles.repeatButtonActive]}
-              onPress={() => {
-                if (repeatEnabled) {
-                  setRepeatEnabled(false);
-                  repeatEnabledRef.current = false;
-                  if (speaking) stopSpeaking();
-                } else {
-                  playbackRun.current += 1;
-                  setPlaylist(null);
-                  sherpaStop();
-                  setRepeatEnabled(true);
-                  repeatEnabledRef.current = true;
-                  void (async () => {
-                      setSpeaking(true);
-                      setSpeechMessage("");
-                      try {
-                        if (!sherpaTtsAvailable) throw new Error("The Sherpa German voice engine is missing from this APK. Build a new Android APK from the updated project.");
-                        while (repeatEnabledRef.current) await sherpaSpeak(sentence.de);
-                      } catch (error) {
-                        setSpeechMessage(error?.message || "Could not repeat this sentence.");
-                        repeatEnabledRef.current = false;
-                        setRepeatEnabled(false);
-                      } finally {
-                        setSpeaking(false);
-                        setVoiceStatus("");
-                      }
-                    })();
-                }
-              }}
+              style={[styles.listenButton, playbackMode === "sentence" && styles.listenButtonActive]}
+              onPress={() => playbackMode === "sentence" ? stopSpeaking() : startSentenceLoop(sentence.de)}
               accessibilityRole="button"
-              accessibilityLabel={repeatEnabled ? "Stop repeating sentence" : "Repeat sentence continuously"}
+              accessibilityLabel={playbackMode === "sentence" ? "Stop repeating sentence" : "Repeat sentence continuously"}
             >
-              <Text style={[styles.repeatButtonText, repeatEnabled && styles.repeatButtonTextActive]}>
-                {repeatEnabled ? "↻  Repeating · tap to stop" : "↻  Repeat sentence"}
+              <Text style={[styles.listenButtonText, playbackMode === "sentence" && styles.listenButtonTextActive]}>
+                {playbackMode === "sentence" ? "■  Stop repeating" : "↻  Hear sentence · repeat"}
               </Text>
             </Pressable>
             {view === "today" && !completedToday ? (
@@ -351,10 +328,8 @@ const styles = StyleSheet.create({
   bottomActions: { paddingBottom: 18 },
   listenButton: { backgroundColor: C.text, borderRadius: 18, minHeight: 62, alignItems: "center", justifyContent: "center" },
   listenButtonText: { color: C.bg, fontSize: 19, fontWeight: "700" },
-  repeatButton: { marginTop: 10, borderColor: C.faint, borderWidth: 1, borderRadius: 16, minHeight: 52, alignItems: "center", justifyContent: "center" },
-  repeatButtonActive: { borderColor: C.accent, backgroundColor: C.panel },
-  repeatButtonText: { color: C.dim, fontSize: 16, fontWeight: "600" },
-  repeatButtonTextActive: { color: C.accent },
+  listenButtonActive: { backgroundColor: C.accent },
+  listenButtonTextActive: { color: C.bg },
   learnButton: { marginTop: 12, borderRadius: 16, minHeight: 56, paddingHorizontal: 18, backgroundColor: C.panel, alignItems: "center", justifyContent: "center" },
   learnButtonText: { color: C.text, fontSize: 16, fontWeight: "600" },
   libraryWrap: { paddingHorizontal: 22, paddingBottom: 44 },
