@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  AppState, Modal, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
+  AppState, BackHandler, Modal, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View,
 } from "react-native";
 import { SENTENCES } from "./src/sentences";
 import { loadState, saveState } from "./src/storage";
@@ -47,6 +47,26 @@ export default function App() {
     });
     return () => sub.remove();
   }, []);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (showAdd) {
+        setShowAdd(false);
+        return true;
+      }
+      if (view === "library") {
+        stopSpeaking();
+        if (libraryId) {
+          setLibraryId(null);
+        } else {
+          setView("today");
+        }
+        return true;
+      }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [libraryId, showAdd, view]);
 
   useEffect(() => {
     const subscription = addVoiceDownloadListener(({ progress }) => {
